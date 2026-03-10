@@ -26,3 +26,9 @@ export type {
   TbtcQuoteResult,
   TbtcWormholeBridgeProviderOptions,
 } from './providers/tbtc-wormhole/TbtcWormholeBridgeProvider'
+
+export { MayanBridgeProvider } from './providers/mayan/MayanBridgeProvider'
+export type {
+  MayanQuoteResult,
+  MayanBridgeProviderOptions,
+} from './providers/mayan/MayanBridgeProvider'
