@@ -20,3 +20,9 @@ export type {
   NearIntentsQuoteResult,
   NearIntentsBridgeProviderOptions,
 } from './providers/near-intents/NearIntentsBridgeProvider'
+
+export { TbtcWormholeBridgeProvider } from './providers/tbtc-wormhole/TbtcWormholeBridgeProvider'
+export type {
+  TbtcQuoteResult,
+  TbtcWormholeBridgeProviderOptions,
+} from './providers/tbtc-wormhole/TbtcWormholeBridgeProvider'
