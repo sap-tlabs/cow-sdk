@@ -20,3 +20,6 @@ export const MIN_BRIDGE_AMOUNT = 1n
 
 // Quote timeout in milliseconds
 export const QUOTE_TIMEOUT_MS = 10_000
+
+// Mayan tokens API
+export const MAYAN_TOKENS_API_BASE = 'https://price-api.mayan.finance/v3/tokens'

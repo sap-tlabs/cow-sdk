@@ -80,10 +80,10 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
       }
     }
 
-    // Mayan supports many tokens. Return an empty list here — the SDK/API
-    // determines token availability per route at quote time.
-    // CoW's routing layer handles intermediate token selection.
-    return { tokens: [], isRouteAvailable: true }
+    const tokens = await this.api.getTokens(params.buyChainId as SupportedChainId)
+    const isRouteAvailable = tokens.length > 0
+
+    return { tokens, isRouteAvailable }
   }
 
   async getIntermediateTokens(request: QuoteBridgeRequest): Promise<TokenInfo[]> {
@@ -172,7 +172,7 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
       },
       limits: {
         minDeposit: MIN_BRIDGE_AMOUNT,
-        maxDeposit: sellAmount * 100n, // Mayan doesn't have a hard cap; use generous upper bound
+        maxDeposit: sellAmount * 100n,
       },
       sourceChainId,
       destChainId,
@@ -183,7 +183,15 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
   // ─── Transaction Building ───────────────────────────────────────────
 
   async getUnsignedBridgeCall(request: QuoteBridgeRequest, quote: MayanQuoteResult): Promise<EvmCall> {
-    return createMayanBridgeCall({ request, quote })
+    const ownerAddress = request.owner ?? request.account
+    if (!ownerAddress) {
+      throw new Error('Owner or account address required to derive CowShed proxy')
+    }
+
+    const cowShedAccount = this.cowShedSdk.getCowShedAccount(request.sellTokenChainId, ownerAddress)
+    const destinationAddress = request.receiver ?? ownerAddress
+
+    return createMayanBridgeCall({ request, quote, cowShedAccount, destinationAddress })
   }
 
   async getGasLimitEstimationForHook(request: QuoteBridgeRequest): Promise<number> {
@@ -255,7 +263,7 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
         fillDeadline: null,
         recipient: order.receiver ?? order.owner,
         sourceChainId: chainId as number,
-        destinationChainId: chainId as number, // TODO: extract from order appData
+        destinationChainId: chainId as number,
         bridgingId: order.uid,
       },
       status,
@@ -269,7 +277,7 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
   // ─── Not Applicable ─────────────────────────────────────────────────
 
   async decodeBridgeHook(): Promise<BridgeDeposit> {
-    throw new Error('decodeBridgeHook not implemented for Mayan provider')
+    throw new Error('Not implemented')
   }
 
   async getCancelBridgingTx(): Promise<EvmCall> {

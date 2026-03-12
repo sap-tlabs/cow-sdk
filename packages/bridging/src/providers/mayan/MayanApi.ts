@@ -1,21 +1,24 @@
-import type { SupportedChainId } from '@cowprotocol/sdk-config'
+import type { SupportedChainId, TokenInfo } from '@cowprotocol/sdk-config'
+import { fetchQuote as mayanFetchQuote } from '@mayanfinance/swap-sdk'
 
 import type { BridgeStatusResult } from '../../types'
 import { BridgeStatus } from '../../types'
 import type { MayanApiQuote, MayanSwapStatus } from './types'
 import { MAYAN_CHAIN_NAMES } from './const/contracts'
+import { THRESHOLD_EVM_REFERRER } from './const/contracts'
 import {
-  MAYAN_PRICE_API_BASE,
   MAYAN_EXPLORER_API_BASE,
+  MAYAN_TOKENS_API_BASE,
   DEFAULT_SLIPPAGE_BPS,
   REFERRER_BPS,
   QUOTE_TIMEOUT_MS,
 } from './const/misc'
-import { THRESHOLD_EVM_REFERRER } from './const/contracts'
+
+export type MayanSdkQuote = Awaited<ReturnType<typeof mayanFetchQuote>>[number]
 
 export class MayanApi {
   /**
-   * Fetch bridge/swap quotes from Mayan's Price API.
+   * Fetch bridge/swap quotes using the Mayan SDK's fetchQuote.
    * Returns the best quote (first in array) or null if no routes available.
    */
   async getQuote(params: {
@@ -33,40 +36,59 @@ export class MayanApi {
 
     const amountFloat = Number(params.amount) / 10 ** params.fromDecimals
 
-    const queryParams = new URLSearchParams({
-      amount: amountFloat.toString(),
-      fromToken: params.fromToken,
-      toToken: params.toToken,
-      fromChain,
-      toChain,
-      slippageBps: (params.slippageBps ?? DEFAULT_SLIPPAGE_BPS).toString(),
-      referrer: THRESHOLD_EVM_REFERRER,
-      referrerBps: REFERRER_BPS.toString(),
-    })
-
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), QUOTE_TIMEOUT_MS)
 
     try {
-      const response = await fetch(`${MAYAN_PRICE_API_BASE}/quote?${queryParams}`, {
-        signal: controller.signal,
+      const quotes: MayanSdkQuote[] = await mayanFetchQuote({
+        amount: amountFloat,
+        fromToken: params.fromToken,
+        toToken: params.toToken,
+        fromChain: fromChain as Parameters<typeof mayanFetchQuote>[0]['fromChain'],
+        toChain: toChain as Parameters<typeof mayanFetchQuote>[0]['toChain'],
+        slippageBps: params.slippageBps ?? DEFAULT_SLIPPAGE_BPS,
+        referrer: THRESHOLD_EVM_REFERRER,
+        referrerBps: REFERRER_BPS,
       })
 
-      if (!response.ok) return null
+      const best = quotes[0]
+      if (!best) return null
 
-      const data = (await response.json()) as MayanApiQuote[] | { quotes: MayanApiQuote[] }
-
-      // API may return array directly or wrapped in { quotes: [...] }
-      const quotes = Array.isArray(data) ? data : data.quotes ?? []
-      if (quotes.length === 0) return null
-
-      const best = quotes[0] as MayanApiQuote
-      best._raw = best
-      return best
+      return this.mapSdkQuoteToApiQuote(best)
     } catch {
       return null
     } finally {
       clearTimeout(timeout)
+    }
+  }
+
+  /**
+   * Fetch supported tokens for a given chain from Mayan's tokens API.
+   */
+  async getTokens(chainId: SupportedChainId): Promise<TokenInfo[]> {
+    const chainName = MAYAN_CHAIN_NAMES[chainId]
+    if (!chainName) return []
+
+    try {
+      const response = await fetch(MAYAN_TOKENS_API_BASE)
+      if (!response.ok) return []
+
+      const data = (await response.json()) as Record<string, MayanTokenApiEntry[]>
+      const chainTokens = data[chainName]
+      if (!Array.isArray(chainTokens)) return []
+
+      return chainTokens
+        .filter((t) => t.verified && t.contract !== '0x0000000000000000000000000000000000000000')
+        .map((t) => ({
+          chainId: chainId as number,
+          address: t.contract,
+          name: t.name,
+          symbol: t.symbol,
+          decimals: t.decimals,
+          logoUrl: t.logoURI,
+        }))
+    } catch {
+      return []
     }
   }
 
@@ -105,4 +127,41 @@ export class MayanApi {
       return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
     }
   }
+
+  private mapSdkQuoteToApiQuote(sdkQuote: MayanSdkQuote): MayanApiQuote {
+    return {
+      type: sdkQuote.type,
+      effectiveAmountIn: sdkQuote.effectiveAmountIn,
+      expectedAmountOut: sdkQuote.expectedAmountOut,
+      minAmountOut: sdkQuote.minAmountOut,
+      minReceived: sdkQuote.minReceived,
+      etaSeconds: sdkQuote.etaSeconds,
+      price: sdkQuote.price,
+      priceImpact: sdkQuote.priceImpact ?? 0,
+      swapRelayerFee: sdkQuote.swapRelayerFee,
+      redeemRelayerFee: sdkQuote.redeemRelayerFee,
+      refundRelayerFee: sdkQuote.refundRelayerFee,
+      solanaRelayerFee: sdkQuote.solanaRelayerFee,
+      deadline64: sdkQuote.deadline64,
+      referrerBps: sdkQuote.referrerBps ?? 0,
+      protocolBps: sdkQuote.protocolBps ?? 0,
+      fromToken: sdkQuote.fromToken,
+      toToken: sdkQuote.toToken,
+      fromChain: sdkQuote.fromChain,
+      toChain: sdkQuote.toChain,
+      _raw: sdkQuote,
+    }
+  }
+}
+
+interface MayanTokenApiEntry {
+  name: string
+  symbol: string
+  contract: string
+  mint: string
+  chainId: number
+  decimals: number
+  logoURI: string
+  verified: boolean
+  standard: string
 }
