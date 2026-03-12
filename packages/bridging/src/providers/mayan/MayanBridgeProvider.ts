@@ -24,12 +24,11 @@ import { getGasLimitEstimationForHook } from '../utils/getGasLimitEstimationForH
 import { MayanApi } from './MayanApi'
 import type { MayanBridgeProviderOptions, MayanQuoteResult } from './types'
 import { createMayanBridgeCall, isMayanRouteSupported } from './createMayanBridgeCall'
-import { MAYAN_CHAIN_NAMES } from './const/contracts'
+import { MAYAN_CHAIN_NAMES, MAYAN_CHAIN_IDS_BY_NAME } from './const/contracts'
 import {
   MAYAN_HOOK_DAPP_ID,
   EXPECTED_FILL_TIME_SECONDS,
   DEFAULT_SLIPPAGE_BPS,
-  MIN_BRIDGE_AMOUNT,
 } from './const/misc'
 
 const MAYAN_SUPPORTED_NETWORKS: ChainInfo[] = [mainnet, arbitrumOne, base]
@@ -91,9 +90,6 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
       throw new BridgeProviderQuoteError(BridgeQuoteErrors.ONLY_SELL_ORDER_SUPPORTED, { kind: request.kind })
     }
 
-    // Mayan can swap+bridge in one step, so the intermediate token
-    // IS the sell token on the source chain. The Mayan Forwarder handles
-    // the swap internally if needed.
     return [
       {
         chainId: request.sellTokenChainId as number,
@@ -108,6 +104,10 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
   // ─── Quote ──────────────────────────────────────────────────────────
 
   async getQuote(request: QuoteBridgeRequest): Promise<MayanQuoteResult> {
+    if (request.kind !== OrderKind.SELL) {
+      throw new BridgeProviderQuoteError(BridgeQuoteErrors.ONLY_SELL_ORDER_SUPPORTED, { kind: request.kind })
+    }
+
     const sourceChainId = request.sellTokenChainId
     const destChainId = request.buyTokenChainId as SupportedChainId
 
@@ -118,11 +118,7 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
       })
     }
 
-    if (request.amount < MIN_BRIDGE_AMOUNT) {
-      throw new BridgeProviderQuoteError(BridgeQuoteErrors.SELL_AMOUNT_TOO_SMALL, {
-        amount: request.amount.toString(),
-      })
-    }
+    const slippageBps = request.bridgeSlippageBps ?? DEFAULT_SLIPPAGE_BPS
 
     const mayanQuote = await this.api.getQuote({
       fromToken: request.sellTokenAddress,
@@ -131,7 +127,7 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
       toChainId: destChainId,
       amount: request.amount,
       fromDecimals: request.sellTokenDecimals,
-      slippageBps: request.bridgeSlippageBps ?? DEFAULT_SLIPPAGE_BPS,
+      slippageBps,
     })
 
     if (!mayanQuote) {
@@ -142,37 +138,40 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
     }
 
     const sellAmount = request.amount
-    const buyDecimals = request.buyTokenDecimals
-    const buyAmount = BigInt(Math.floor(mayanQuote.expectedAmountOut * 10 ** buyDecimals))
-    const minBuyAmount = BigInt(Math.floor(mayanQuote.minAmountOut * 10 ** buyDecimals))
 
-    const totalRelayerFee = mayanQuote.swapRelayerFee + mayanQuote.redeemRelayerFee + mayanQuote.solanaRelayerFee
-    const bridgeFee = BigInt(Math.floor(totalRelayerFee * 10 ** buyDecimals))
+    // Use base-unit strings from SDK to avoid floating-point precision loss
+    const buyAmount = BigInt(mayanQuote.expectedAmountOutBaseUnits)
+    const minBuyAmount = BigInt(mayanQuote.minReceivedBaseUnits)
+
+    // Compute fees proportionally via BPS to keep sell/buy currency amounts consistent
+    const feeBps = mayanQuote.protocolBps + mayanQuote.referrerBps
+    const feeInSellCurrency = feeBps > 0 ? (sellAmount * BigInt(feeBps)) / 10000n : 0n
+    const feeInBuyCurrency = feeBps > 0 ? (buyAmount * BigInt(feeBps)) / 10000n : 0n
 
     return {
       isSell: true,
       amountsAndCosts: {
         costs: {
           bridgingFee: {
-            feeBps: mayanQuote.protocolBps + mayanQuote.referrerBps,
-            amountInSellCurrency: bridgeFee,
-            amountInBuyCurrency: bridgeFee,
+            feeBps,
+            amountInSellCurrency: feeInSellCurrency,
+            amountInBuyCurrency: feeInBuyCurrency,
           },
         },
         beforeFee: { sellAmount, buyAmount },
-        afterFee: { sellAmount, buyAmount: minBuyAmount },
+        afterFee: { sellAmount, buyAmount: buyAmount - feeInBuyCurrency },
         afterSlippage: { sellAmount, buyAmount: minBuyAmount },
-        slippageBps: DEFAULT_SLIPPAGE_BPS,
+        slippageBps,
       },
       quoteTimestamp: Date.now(),
       expectedFillTimeSeconds: mayanQuote.etaSeconds || EXPECTED_FILL_TIME_SECONDS,
       fees: {
-        bridgeFee,
+        bridgeFee: feeInBuyCurrency,
         destinationGasFee: 0n,
       },
       limits: {
-        minDeposit: MIN_BRIDGE_AMOUNT,
-        maxDeposit: sellAmount * 100n,
+        minDeposit: 0n,
+        maxDeposit: 0n,
       },
       sourceChainId,
       destChainId,
@@ -252,6 +251,12 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
   ): Promise<{ params: BridgingDepositParams; status: BridgeStatusResult } | null> {
     const status = await this.api.getStatus(txHash)
 
+    // Extract destination chain from Mayan API response
+    const rawStatus = await this.api.getRawStatus(txHash)
+    const destChainId = rawStatus?.destChain
+      ? (MAYAN_CHAIN_IDS_BY_NAME[rawStatus.destChain] ?? (chainId as number))
+      : (chainId as number)
+
     return {
       params: {
         inputTokenAddress: order.sellToken,
@@ -263,8 +268,8 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
         fillDeadline: null,
         recipient: order.receiver ?? order.owner,
         sourceChainId: chainId as number,
-        destinationChainId: chainId as number,
-        bridgingId: order.uid,
+        destinationChainId: destChainId,
+        bridgingId: txHash,
       },
       status,
     }
@@ -276,15 +281,15 @@ export class MayanBridgeProvider implements HookBridgeProvider<MayanQuoteResult>
 
   // ─── Not Applicable ─────────────────────────────────────────────────
 
-  async decodeBridgeHook(): Promise<BridgeDeposit> {
+  async decodeBridgeHook(_hook: unknown): Promise<BridgeDeposit> {
     throw new Error('Not implemented')
   }
 
-  async getCancelBridgingTx(): Promise<EvmCall> {
+  async getCancelBridgingTx(_bridgingId: string): Promise<EvmCall> {
     throw new Error('Mayan swaps cannot be cancelled once submitted')
   }
 
-  async getRefundBridgingTx(): Promise<EvmCall> {
+  async getRefundBridgingTx(_bridgingId: string): Promise<EvmCall> {
     throw new Error('Mayan handles refunds automatically via its relay system')
   }
 }

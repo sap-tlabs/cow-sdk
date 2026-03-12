@@ -19,7 +19,7 @@ export interface MayanQuoteResult extends BridgeQuoteResult {
 
 /** Subset of Mayan Price API quote response we actually use */
 export interface MayanApiQuote {
-  type: string // 'SWIFT' | 'MCTP' | 'WH'
+  type: string // 'SWIFT' | 'MCTP' | 'WH' | 'FAST_MCTP' | 'MONO_CHAIN'
   effectiveAmountIn: number
   expectedAmountOut: number
   minAmountOut: number
@@ -38,7 +38,10 @@ export interface MayanApiQuote {
   toToken: MayanTokenInfo
   fromChain: string
   toChain: string
-  /** Full quote object needed by the SDK to build tx payload */
+  /** Base-unit string amounts (no precision loss) */
+  expectedAmountOutBaseUnits: string
+  minReceivedBaseUnits: string
+  /** Full SDK Quote object needed by getSwapFromEvmTxPayload */
   _raw: unknown
 }
 

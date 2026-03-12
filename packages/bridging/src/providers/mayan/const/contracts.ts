@@ -18,6 +18,13 @@ export const MAYAN_CHAIN_NAMES: Partial<Record<SupportedChainId, string>> = {
   [SupportedChainId.BASE]: 'base',
 }
 
+// Reverse mapping: Mayan chain name → CoW chain ID
+export const MAYAN_CHAIN_IDS_BY_NAME: Record<string, number> = {
+  ethereum: SupportedChainId.MAINNET,
+  arbitrum: SupportedChainId.ARBITRUM_ONE,
+  base: SupportedChainId.BASE,
+}
+
 // Threshold DAO referrer addresses for fee sharing
 export const THRESHOLD_EVM_REFERRER = '0xAEC64338a8cAc51dD74D40Ff745A07798Ddef0ED'
 

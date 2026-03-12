@@ -3,8 +3,6 @@ import { BridgeStatus, QuoteBridgeRequest } from '../../types'
 import { MayanApi } from './MayanApi'
 import {
   MAYAN_HOOK_DAPP_ID,
-  EXPECTED_FILL_TIME_SECONDS,
-  MIN_BRIDGE_AMOUNT,
 } from './const/misc'
 import {
   MayanBridgeProvider,
@@ -149,6 +147,8 @@ adapterNames.forEach((adapterName) => {
         },
         fromChain: 'ethereum',
         toChain: 'arbitrum',
+        expectedAmountOutBaseUnits: '990000000000000000',
+        minReceivedBaseUnits: '985000000000000000',
         _raw: {},
       }
 
@@ -158,7 +158,7 @@ adapterNames.forEach((adapterName) => {
         provider.setApi(mockApi)
       })
 
-      it('should return quote with amounts and fees', async () => {
+      it('should return quote with amounts from base-unit strings', async () => {
         const request: QuoteBridgeRequest = {
           kind: OrderKind.SELL,
           sellTokenAddress: '0x18084fbA666a33d37592fA2633fD49a74DD93a88',
@@ -179,7 +179,9 @@ adapterNames.forEach((adapterName) => {
         expect(quote.destChainId).toBe(SupportedChainId.ARBITRUM_ONE)
         expect(quote.mayanQuote).toEqual(mockMayanQuote)
         expect(quote.expectedFillTimeSeconds).toBe(45)
-        expect(quote.amountsAndCosts.beforeFee.sellAmount).toBe(BigInt('1000000000000000000'))
+        // Buy amount from base-unit string, no float conversion
+        expect(quote.amountsAndCosts.beforeFee.buyAmount).toBe(BigInt('990000000000000000'))
+        expect(quote.amountsAndCosts.afterSlippage.buyAmount).toBe(BigInt('985000000000000000'))
         expect(quote.amountsAndCosts.costs.bridgingFee.feeBps).toBe(50)
       })
 
@@ -200,21 +202,21 @@ adapterNames.forEach((adapterName) => {
         await expect(provider.getQuote(request)).rejects.toThrow('NO_ROUTES')
       })
 
-      it('should throw SELL_AMOUNT_TOO_SMALL for dust amounts', async () => {
+      it('should throw ONLY_SELL_ORDER_SUPPORTED for BUY orders', async () => {
         const request: QuoteBridgeRequest = {
-          kind: OrderKind.SELL,
+          kind: OrderKind.BUY,
           sellTokenAddress: '0x18084fbA666a33d37592fA2633fD49a74DD93a88',
           sellTokenChainId: SupportedChainId.MAINNET,
           buyTokenChainId: SupportedChainId.ARBITRUM_ONE,
           buyTokenAddress: '0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40',
-          amount: 0n,
+          amount: BigInt('1000000000000000000'),
           sellTokenDecimals: 18,
           buyTokenDecimals: 18,
           appCode: '0x123',
           signer: '0xa43ccc40ff785560dab6cb0f13b399d050073e8a54114621362f69444e1421ca',
         }
 
-        await expect(provider.getQuote(request)).rejects.toThrow('SELL_AMOUNT_TOO_SMALL')
+        await expect(provider.getQuote(request)).rejects.toThrow('ONLY_SELL_ORDER_SUPPORTED')
       })
     })
 

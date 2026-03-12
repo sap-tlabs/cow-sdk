@@ -11,7 +11,6 @@ import {
   MAYAN_TOKENS_API_BASE,
   DEFAULT_SLIPPAGE_BPS,
   REFERRER_BPS,
-  QUOTE_TIMEOUT_MS,
 } from './const/misc'
 
 export type MayanSdkQuote = Awaited<ReturnType<typeof mayanFetchQuote>>[number]
@@ -19,7 +18,7 @@ export type MayanSdkQuote = Awaited<ReturnType<typeof mayanFetchQuote>>[number]
 export class MayanApi {
   /**
    * Fetch bridge/swap quotes using the Mayan SDK's fetchQuote.
-   * Returns the best quote (first in array) or null if no routes available.
+   * Returns the best quote or null if no routes available.
    */
   async getQuote(params: {
     fromToken: string
@@ -34,14 +33,9 @@ export class MayanApi {
     const toChain = MAYAN_CHAIN_NAMES[params.toChainId]
     if (!fromChain || !toChain) return null
 
-    const amountFloat = Number(params.amount) / 10 ** params.fromDecimals
-
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), QUOTE_TIMEOUT_MS)
-
     try {
       const quotes: MayanSdkQuote[] = await mayanFetchQuote({
-        amount: amountFloat,
+        amountIn64: params.amount.toString(),
         fromToken: params.fromToken,
         toToken: params.toToken,
         fromChain: fromChain as Parameters<typeof mayanFetchQuote>[0]['fromChain'],
@@ -57,8 +51,6 @@ export class MayanApi {
       return this.mapSdkQuoteToApiQuote(best)
     } catch {
       return null
-    } finally {
-      clearTimeout(timeout)
     }
   }
 
@@ -96,35 +88,43 @@ export class MayanApi {
    * Poll Mayan Explorer API for swap status by source transaction hash.
    */
   async getStatus(txHash: string): Promise<BridgeStatusResult> {
+    const rawStatus = await this.getRawStatus(txHash)
+    if (!rawStatus) {
+      return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
+    }
+
+    const completedStatuses = ['SETTLED_ON_SOLANA', 'REDEEMED', 'COMPLETED']
+    const failedStatuses = ['REFUNDED', 'FAILED']
+
+    if (completedStatuses.includes(rawStatus.status) || rawStatus.completedAt) {
+      return {
+        status: BridgeStatus.EXECUTED,
+        depositTxHash: txHash,
+        fillTxHash: rawStatus.destTxHash,
+      }
+    }
+
+    if (failedStatuses.includes(rawStatus.status)) {
+      return {
+        status: BridgeStatus.REFUND,
+        depositTxHash: txHash,
+      }
+    }
+
+    return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
+  }
+
+  /**
+   * Fetch full swap status from Mayan Explorer API.
+   * Used by getBridgingParams to extract destination chain.
+   */
+  async getRawStatus(txHash: string): Promise<MayanSwapStatus | null> {
     try {
       const response = await fetch(`${MAYAN_EXPLORER_API_BASE}/swap/trx/${txHash}`)
-      if (!response.ok) {
-        return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
-      }
-
-      const data = (await response.json()) as MayanSwapStatus
-
-      const completedStatuses = ['SETTLED_ON_SOLANA', 'REDEEMED', 'COMPLETED']
-      const failedStatuses = ['REFUNDED', 'FAILED']
-
-      if (completedStatuses.includes(data.status) || data.completedAt) {
-        return {
-          status: BridgeStatus.EXECUTED,
-          depositTxHash: txHash,
-          fillTxHash: data.destTxHash,
-        }
-      }
-
-      if (failedStatuses.includes(data.status)) {
-        return {
-          status: BridgeStatus.REFUND,
-          depositTxHash: txHash,
-        }
-      }
-
-      return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
+      if (!response.ok) return null
+      return (await response.json()) as MayanSwapStatus
     } catch {
-      return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
+      return null
     }
   }
 
@@ -149,6 +149,8 @@ export class MayanApi {
       toToken: sdkQuote.toToken,
       fromChain: sdkQuote.fromChain,
       toChain: sdkQuote.toChain,
+      expectedAmountOutBaseUnits: sdkQuote.expectedAmountOutBaseUnits,
+      minReceivedBaseUnits: sdkQuote.minReceivedBaseUnits,
       _raw: sdkQuote,
     }
   }
