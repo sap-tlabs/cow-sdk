@@ -25,8 +25,9 @@ export class TbtcWormholeApi {
         return { status: BridgeStatus.IN_PROGRESS, depositTxHash: txHash }
       }
 
-      const data = (await response.json()) as WormholeVaaResponse
-      if (data?.data?.vaa) {
+      const body = (await response.json()) as WormholeVaaResponse
+      const firstVaa = body?.data?.[0]
+      if (firstVaa?.vaa) {
         return {
           status: BridgeStatus.EXECUTED,
           depositTxHash: txHash,
@@ -42,12 +43,18 @@ export class TbtcWormholeApi {
   /**
    * Extract the Wormhole sequence number from a transaction receipt's logs.
    * Looks for the LogMessagePublished event emitted by Wormhole Core.
+   *
+   * LogMessagePublished(address indexed sender, uint64 sequence, uint32 nonce, bytes payload, uint8 consistencyLevel)
+   * Only `sender` is indexed (topics[1]). The sequence is the first uint64 in the ABI-encoded data field.
    */
   extractSequenceFromReceipt(receipt: { logs: Array<{ topics: readonly string[]; data: string }> }): string | null {
     for (const log of receipt.logs) {
-      const topic1 = log.topics[1]
-      if (log.topics[0] === LOG_MESSAGE_PUBLISHED_TOPIC && topic1) {
-        return BigInt(topic1).toString()
+      if (log.topics[0] === LOG_MESSAGE_PUBLISHED_TOPIC) {
+        // sequence is the first uint64 in data, ABI-encoded as uint256 (32 bytes, zero-padded)
+        if (log.data.length >= 66) {
+          const sequenceHex = log.data.slice(2, 66) // first 32 bytes of data
+          return BigInt('0x' + sequenceHex).toString()
+        }
       }
     }
     return null

@@ -40,7 +40,7 @@ import {
 } from './const/misc'
 
 const TBTC_SUPPORTED_NETWORKS: ChainInfo[] = [mainnet, arbitrumOne, base]
-const SLIPPAGE_BPS = 0 // tBTC→tBTC bridge is 1:1
+const SLIPPAGE_BPS = 0 // tBTC->tBTC bridge is 1:1
 
 const providerType = 'HookBridgeProvider' as const
 
@@ -82,7 +82,6 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
       return { tokens: [], isRouteAvailable: false }
     }
 
-    // Verify this is a supported L1↔L2 route
     if (params.sellChainId) {
       try {
         getBridgeDirection(params.sellChainId, params.buyChainId as SupportedChainId)
@@ -124,6 +123,10 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
   // ─── Quote ──────────────────────────────────────────────────────────
 
   async getQuote(request: QuoteBridgeRequest): Promise<TbtcQuoteResult> {
+    if (request.kind !== OrderKind.SELL) {
+      throw new BridgeProviderQuoteError(BridgeQuoteErrors.ONLY_SELL_ORDER_SUPPORTED, { kind: request.kind })
+    }
+
     const sourceChainId = request.sellTokenChainId
     const destChainId = request.buyTokenChainId as SupportedChainId
     const direction = getBridgeDirection(sourceChainId, destChainId)
@@ -148,7 +151,16 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
       })
     }
 
-    // tBTC→tBTC is 1:1, no price slippage
+    // Reject if amount exceeds L2 minting capacity
+    if (direction === 'L1_TO_L2' && remainingCapacity !== null && sellAmount > remainingCapacity) {
+      throw new BridgeProviderQuoteError(BridgeQuoteErrors.NO_ROUTES, {
+        reason: 'Amount exceeds L2 minting capacity',
+        amount: sellAmount.toString(),
+        capacity: remainingCapacity.toString(),
+      })
+    }
+
+    // tBTC->tBTC is 1:1, no price slippage
     const buyAmount = sellAmount
 
     return {
@@ -157,8 +169,8 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
         costs: {
           bridgingFee: {
             feeBps: 0,
-            amountInSellCurrency: messageFee,
-            amountInBuyCurrency: messageFee,
+            amountInSellCurrency: 0n,
+            amountInBuyCurrency: 0n,
           },
         },
         beforeFee: { sellAmount, buyAmount },
@@ -261,6 +273,9 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
 
     const status = await this.api.getStatus(txHash, chainId as SupportedChainId)
 
+    // Infer destination chain from buy token address
+    const destChainId = this.inferDestChainFromBuyToken(order.buyToken) ?? (chainId as number)
+
     return {
       params: {
         inputTokenAddress: order.sellToken,
@@ -272,8 +287,8 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
         fillDeadline: null,
         recipient: order.receiver ?? order.owner,
         sourceChainId: chainId as number,
-        destinationChainId: chainId as number, // TODO: extract from order appData
-        bridgingId: order.uid,
+        destinationChainId: destChainId,
+        bridgingId: txHash,
       },
       status,
     }
@@ -285,16 +300,16 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
 
   // ─── Not Applicable ─────────────────────────────────────────────────
 
-  async decodeBridgeHook(): Promise<BridgeDeposit> {
+  async decodeBridgeHook(_hook: unknown): Promise<BridgeDeposit> {
     throw new Error('Not implemented')
   }
 
-  async getCancelBridgingTx(): Promise<EvmCall> {
+  async getCancelBridgingTx(_bridgingId: string): Promise<EvmCall> {
     throw new Error('Wormhole deposits cannot be cancelled once submitted')
   }
 
-  async getRefundBridgingTx(): Promise<EvmCall> {
-    throw new Error('Wormhole deposits cannot be refunded — VAA must be redeemed')
+  async getRefundBridgingTx(_bridgingId: string): Promise<EvmCall> {
+    throw new Error('Wormhole deposits cannot be refunded - VAA must be redeemed')
   }
 
   // ─── Private Helpers ────────────────────────────────────────────────
@@ -303,17 +318,13 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
     const coreAddress = WORMHOLE_CORE_ADDRESSES[chainId]
     if (!coreAddress) return 0n
 
-    try {
-      const adapter = getGlobalAdapter()
-      const result = await adapter.readContract({
-        address: coreAddress,
-        abi: WORMHOLE_CORE_ABI,
-        functionName: 'messageFee',
-      })
-      return BigInt(result as string | number)
-    } catch {
-      return 0n
-    }
+    const adapter = getGlobalAdapter()
+    const result = await adapter.readContract({
+      address: coreAddress,
+      abi: WORMHOLE_CORE_ABI,
+      functionName: 'messageFee',
+    })
+    return BigInt(result as string | number)
   }
 
   private async getRemainingMintingCapacity(destChainId: SupportedChainId): Promise<bigint | null> {
@@ -341,5 +352,18 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
     } catch {
       return null
     }
+  }
+
+  /**
+   * Infer the destination chain by looking up the buy token address in the known tBTC addresses.
+   */
+  private inferDestChainFromBuyToken(buyToken: string): number | null {
+    const buyTokenLower = buyToken.toLowerCase()
+    for (const [chainIdStr, address] of Object.entries(TBTC_TOKEN_ADDRESSES)) {
+      if (address?.toLowerCase() === buyTokenLower) {
+        return Number(chainIdStr)
+      }
+    }
+    return null
   }
 }

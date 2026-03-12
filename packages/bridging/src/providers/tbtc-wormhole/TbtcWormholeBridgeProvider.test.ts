@@ -3,7 +3,6 @@ import { BridgeStatus, QuoteBridgeRequest } from '../../types'
 import { TbtcWormholeApi } from './TbtcWormholeApi'
 import {
   TBTC_HOOK_DAPP_ID,
-  EXPECTED_FILL_TIME_SECONDS,
   MIN_BRIDGE_AMOUNT,
 } from './const/misc'
 import {
@@ -12,12 +11,11 @@ import {
 import {
   TbtcWormholeBridgeProvider,
   TbtcWormholeBridgeProviderOptions,
-  TbtcQuoteResult,
 } from './TbtcWormholeBridgeProvider'
 import { SupportedChainId, TargetChainId } from '@cowprotocol/sdk-config'
 import { OrderKind } from '@cowprotocol/sdk-order-book'
 import { createAdapters } from '../../../tests/setup'
-import { setGlobalAdapter, AbstractProviderAdapter } from '@cowprotocol/sdk-common'
+import { setGlobalAdapter } from '@cowprotocol/sdk-common'
 
 jest.mock('./TbtcWormholeApi')
 
@@ -47,7 +45,6 @@ adapterNames.forEach((adapterName) => {
     beforeEach(() => {
       const adapter = adapters[adapterName]
 
-      // Mock readContract for on-chain calls (messageFee, mintingLimit, etc.)
       adapter.readContract = mockReadContract
       mockReadContract.mockImplementation(async (params: { functionName: string }) => {
         if (params.functionName === 'messageFee') return '0'
@@ -137,9 +134,11 @@ adapterNames.forEach((adapterName) => {
         expect(quote.bridgeDirection).toBe('L1_TO_L2')
         expect(quote.sourceChainId).toBe(SupportedChainId.MAINNET)
         expect(quote.destChainId).toBe(SupportedChainId.ARBITRUM_ONE)
-        // 1:1 bridge: buy amount equals sell amount
         expect(quote.amountsAndCosts.beforeFee.buyAmount).toBe(BigInt('1000000000000000000'))
+        // tBTC bridge has zero token fee (message fee is in ETH, not tBTC)
         expect(quote.amountsAndCosts.costs.bridgingFee.feeBps).toBe(0)
+        expect(quote.amountsAndCosts.costs.bridgingFee.amountInSellCurrency).toBe(0n)
+        expect(quote.amountsAndCosts.costs.bridgingFee.amountInBuyCurrency).toBe(0n)
         expect(quote.remainingMintingCapacity).toBe(BigInt('50000000000000000000'))
       })
 
@@ -196,6 +195,40 @@ adapterNames.forEach((adapterName) => {
 
         await expect(provider.getQuote(request)).rejects.toThrow('SELL_AMOUNT_TOO_SMALL')
       })
+
+      it('should throw ONLY_SELL_ORDER_SUPPORTED for BUY orders', async () => {
+        const request: QuoteBridgeRequest = {
+          kind: OrderKind.BUY,
+          sellTokenAddress: TBTC_TOKEN_ADDRESSES[SupportedChainId.MAINNET]!,
+          sellTokenChainId: SupportedChainId.MAINNET,
+          buyTokenChainId: SupportedChainId.ARBITRUM_ONE,
+          buyTokenAddress: TBTC_TOKEN_ADDRESSES[SupportedChainId.ARBITRUM_ONE]!,
+          amount: BigInt('1000000000000000000'),
+          sellTokenDecimals: 18,
+          buyTokenDecimals: 18,
+          appCode: '0x123',
+          signer: '0xa43ccc40ff785560dab6cb0f13b399d050073e8a54114621362f69444e1421ca',
+        }
+
+        await expect(provider.getQuote(request)).rejects.toThrow('ONLY_SELL_ORDER_SUPPORTED')
+      })
+
+      it('should reject when amount exceeds minting capacity', async () => {
+        const request: QuoteBridgeRequest = {
+          kind: OrderKind.SELL,
+          sellTokenAddress: TBTC_TOKEN_ADDRESSES[SupportedChainId.MAINNET]!,
+          sellTokenChainId: SupportedChainId.MAINNET,
+          buyTokenChainId: SupportedChainId.ARBITRUM_ONE,
+          buyTokenAddress: TBTC_TOKEN_ADDRESSES[SupportedChainId.ARBITRUM_ONE]!,
+          amount: BigInt('100000000000000000000'), // 100 tBTC, exceeds 50 tBTC capacity
+          sellTokenDecimals: 18,
+          buyTokenDecimals: 18,
+          appCode: '0x123',
+          signer: '0xa43ccc40ff785560dab6cb0f13b399d050073e8a54114621362f69444e1421ca',
+        }
+
+        await expect(provider.getQuote(request)).rejects.toThrow('NO_ROUTES')
+      })
     })
 
     describe('info', () => {
@@ -239,6 +272,64 @@ adapterNames.forEach((adapterName) => {
 
         expect(status.status).toBe(BridgeStatus.EXECUTED)
         expect(status.depositTxHash).toBe('0xabc')
+      })
+    })
+
+    describe('TbtcWormholeApi', () => {
+      describe('extractSequenceFromReceipt', () => {
+        // Use the real implementation, not the jest mock
+        const { TbtcWormholeApi: RealTbtcWormholeApi } = jest.requireActual('./TbtcWormholeApi') as typeof import('./TbtcWormholeApi')
+        const api = new RealTbtcWormholeApi()
+
+        it('should extract sequence from log data (not topics)', () => {
+          const LOG_TOPIC = '0x6eb224fb001ed210e379b335e35efe88672a8ce935d981a6896b27ffdf52a3b2'
+          const mockReceipt = {
+            logs: [
+              {
+                topics: [
+                  LOG_TOPIC,
+                  '0x0000000000000000000000003ee18b2214aff97000d974cf647e7c347e8fa585', // sender (indexed)
+                ] as readonly string[],
+                // sequence = 42, ABI-encoded as uint256
+                data: '0x000000000000000000000000000000000000000000000000000000000000002a' +
+                  '0000000000000000000000000000000000000000000000000000000000000000' +
+                  '0000000000000000000000000000000000000000000000000000000000000000',
+              },
+            ],
+          }
+
+          const sequence = api.extractSequenceFromReceipt(mockReceipt)
+          expect(sequence).toBe('42')
+        })
+
+        it('should return null when no matching log', () => {
+          const mockReceipt = {
+            logs: [
+              {
+                topics: ['0xdeadbeef'] as readonly string[],
+                data: '0x',
+              },
+            ],
+          }
+
+          const sequence = api.extractSequenceFromReceipt(mockReceipt)
+          expect(sequence).toBeNull()
+        })
+
+        it('should return null when data is too short', () => {
+          const LOG_TOPIC = '0x6eb224fb001ed210e379b335e35efe88672a8ce935d981a6896b27ffdf52a3b2'
+          const mockReceipt = {
+            logs: [
+              {
+                topics: [LOG_TOPIC] as readonly string[],
+                data: '0x00',
+              },
+            ],
+          }
+
+          const sequence = api.extractSequenceFromReceipt(mockReceipt)
+          expect(sequence).toBeNull()
+        })
       })
     })
   })

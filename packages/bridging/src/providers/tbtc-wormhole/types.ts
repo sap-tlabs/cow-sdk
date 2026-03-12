@@ -21,8 +21,8 @@ export interface TbtcQuoteResult extends BridgeQuoteResult {
 }
 
 export interface WormholeVaaResponse {
-  data?: {
+  data?: Array<{
     vaa?: string
     sequence?: string
-  }
+  }>
 }

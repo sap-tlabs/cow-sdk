@@ -13,9 +13,9 @@ import {
 } from './const/contracts'
 
 /**
- * Determine bridge direction from source → destination chain.
- * L1 (Ethereum) → L2: uses Token Bridge transferTokensWithPayload
- * L2 → L1 (Ethereum): uses L2WormholeGateway sendTbtc
+ * Determine bridge direction from source -> destination chain.
+ * L1 (Ethereum) -> L2: uses Token Bridge transferTokensWithPayload
+ * L2 -> L1 (Ethereum): uses L2WormholeGateway sendTbtc
  */
 export function getBridgeDirection(sourceChainId: SupportedChainId, destChainId: SupportedChainId): BridgeDirection {
   if (sourceChainId === destChainId) {
@@ -36,7 +36,7 @@ export function getBridgeDirection(sourceChainId: SupportedChainId, destChainId:
     return 'L2_TO_L1'
   }
 
-  throw new Error(`Unsupported route: ${sourceChainId} → ${destChainId}. Only L1↔L2 routes supported.`)
+  throw new Error(`Unsupported route: ${sourceChainId} -> ${destChainId}. Only L1<->L2 routes supported.`)
 }
 
 /**
@@ -61,8 +61,13 @@ export function createTbtcBridgeCall(params: {
     throw new Error(`tBTC not available on chain ${sourceChainId}`)
   }
 
-  const nonce = Math.floor(Math.random() * 2 ** 32)
-  const recipientBytes32 = padAddressToBytes32(request.receiver ?? request.owner ?? '')
+  const recipient = request.receiver ?? request.owner ?? request.account
+  if (!recipient) {
+    throw new Error('Recipient address required: provide receiver, owner, or account')
+  }
+
+  const nonce = Math.floor(Math.random() * 0xFFFFFFFF)
+  const recipientBytes32 = padAddressToBytes32(recipient)
 
   let callData: string
 
