@@ -286,7 +286,7 @@ export class TbtcWormholeBridgeProvider implements HookBridgeProvider<TbtcQuoteR
   // ─── Not Applicable ─────────────────────────────────────────────────
 
   async decodeBridgeHook(): Promise<BridgeDeposit> {
-    throw new Error('decodeBridgeHook not implemented for tBTC Wormhole provider')
+    throw new Error('Not implemented')
   }
 
   async getCancelBridgingTx(): Promise<EvmCall> {
